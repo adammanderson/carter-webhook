@@ -10,10 +10,12 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /carter-webhook .
 
 # ── Stage 2: runtime ───────────────────────────────────────────────────────────
 FROM alpine:3.19
-RUN apk add --no-cache bash curl
+RUN apk add --no-cache bash curl docker-cli
 
-# Non-root user
+# Non-root user — needs docker group access
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# Add appuser to docker group so it can talk to the socket
+RUN addgroup appuser docker 2>/dev/null || true
 
 WORKDIR /app
 COPY --from=build /carter-webhook .
