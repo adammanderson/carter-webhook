@@ -79,7 +79,7 @@ func main() {
 		composeFile := fmt.Sprintf("/srv/projects/%s/docker-compose.yml", project)
 		if _, err := os.Stat(composeFile); err == nil {
 			// Compose file exists — use docker compose up
-			if err := run("docker", "compose", "-f", composeFile, "up", "-d", "--no-build"); err != nil {
+			if err := run("docker-compose", "-f", composeFile, "up", "-d", "--no-build"); err != nil {
 				log.Error("compose up failed", "err", err)
 				http.Error(w, "compose up failed", http.StatusInternalServerError)
 				return
