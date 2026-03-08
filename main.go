@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/subtle"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,32 +11,23 @@ import (
 	"strings"
 )
 
-// DeployRequest is the JSON body sent by GitHub Actions
-type DeployRequest struct {
-	Project string `json:"project"` // e.g. "bin-collection"
-	Image   string `json:"image"`   // e.g. "ghcr.io/adammanderson/bin-collection-service:latest"
-	Port    string `json:"port"`    // e.g. "8001"
-}
-
 var (
-	// Allowlist: only lowercase alphanumeric and hyphens
 	safeProject = regexp.MustCompile(`^[a-z0-9-]+$`)
-	// Allowlist: ghcr.io images only
-	safeImage = regexp.MustCompile(`^ghcr\.io/[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$`)
-	// Allowlist: numeric port in valid range
-	safePort = regexp.MustCompile(`^[0-9]{4,5}$`)
+	safeImage   = regexp.MustCompile(`^ghcr\.io/[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$`)
 )
+
+func run(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
 
 func main() {
 	secret := os.Getenv("WEBHOOK_SECRET")
 	if secret == "" {
 		slog.Error("WEBHOOK_SECRET is not set")
 		os.Exit(1)
-	}
-
-	deployScript := os.Getenv("DEPLOY_SCRIPT")
-	if deployScript == "" {
-		deployScript = "/srv/projects/deploy.sh"
 	}
 
 	port := os.Getenv("PORT")
@@ -52,55 +42,61 @@ func main() {
 		fmt.Fprintln(w, "ok")
 	})
 
-	mux.HandleFunc("POST /deploy", func(w http.ResponseWriter, r *http.Request) {
+	// POST /redeploy?project=bin-collection&image=ghcr.io/...
+	mux.HandleFunc("POST /redeploy", func(w http.ResponseWriter, r *http.Request) {
 		log := slog.With("remote", r.RemoteAddr)
 
 		// Authorise
-		auth := r.Header.Get("Authorization")
-		token, _ := strings.CutPrefix(auth, "Bearer ")
+		token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(token), []byte(secret)) != 1 {
-			log.Warn("unauthorised deploy attempt")
+			log.Warn("unauthorised")
 			http.Error(w, "unauthorised", http.StatusUnauthorized)
 			return
 		}
 
-		// Parse body
-		var req DeployRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
+		project := r.URL.Query().Get("project")
+		image := r.URL.Query().Get("image")
 
-		// Validate inputs — never pass unsanitised values to exec
-		if !safeProject.MatchString(req.Project) {
-			http.Error(w, "invalid project name", http.StatusBadRequest)
+		if !safeProject.MatchString(project) {
+			http.Error(w, "invalid project", http.StatusBadRequest)
 			return
 		}
-		if !safeImage.MatchString(req.Image) {
+		if !safeImage.MatchString(image) {
 			http.Error(w, "invalid image", http.StatusBadRequest)
 			return
 		}
-		if !safePort.MatchString(req.Port) {
-			http.Error(w, "invalid port", http.StatusBadRequest)
+
+		log.Info("redeploying", "project", project, "image", image)
+
+		// Pull new image
+		if err := run("docker", "pull", image); err != nil {
+			log.Error("pull failed", "err", err)
+			http.Error(w, "pull failed", http.StatusInternalServerError)
 			return
 		}
 
-		log.Info("deploying", "project", req.Project, "image", req.Image, "port", req.Port)
-
-		// Run deploy.sh
-		cmd := exec.Command("bash", deployScript, req.Project, req.Image, req.Port)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Run(); err != nil {
-			log.Error("deploy failed", "err", err)
-			http.Error(w, "deploy failed", http.StatusInternalServerError)
+		// Update the container image tag then restart via compose
+		composeFile := fmt.Sprintf("/srv/projects/%s/docker-compose.yml", project)
+		if _, err := os.Stat(composeFile); err == nil {
+			// Compose file exists — use docker compose up
+			if err := run("docker", "compose", "-f", composeFile, "up", "-d", "--no-build"); err != nil {
+				log.Error("compose up failed", "err", err)
+				http.Error(w, "compose up failed", http.StatusInternalServerError)
+				return
+			}
+		} else {
+			// No compose file — just stop/rm/run won't work without original args
+			// Force recreate by stopping and letting Portainer recreate
+			run("docker", "stop", project)
+			run("docker", "rm", project)
+			log.Warn("no compose file found, container removed — Portainer will need to recreate", "project", project)
+			http.Error(w, "no compose file for "+project, http.StatusInternalServerError)
 			return
 		}
 
-		log.Info("deploy complete", "project", req.Project)
+		log.Info("redeploy complete", "project", project)
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "deployed %s\n", req.Project)
+		fmt.Fprintf(w, "redeployed %s\n", project)
 	})
 
 	slog.Info("carter-webhook listening", "port", port)
