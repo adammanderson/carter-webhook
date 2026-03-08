@@ -60,13 +60,8 @@ jobs:
     environment: production
 
     steps:
-      - name: Trigger webhook
+      - name: Redeploy via carter-webhook
         run: |
-          curl -f -X POST https://deploy.carter.northerly.dev/deploy \
+          curl -sw "\nHTTP %{http_code}\n" -X POST \
             -H "Authorization: Bearer ${{ secrets.WEBHOOK_SECRET }}" \
-            -H "Content-Type: application/json" \
-            -d '{
-              "project": "${{ env.PROJECT_NAME }}",
-              "image":   "ghcr.io/${{ env.IMAGE }}:latest",
-              "port":    "${{ env.PROJECT_PORT }}"
-            }'
+            "https://deploy.carter.northerly.dev/redeploy?project=${{ env.PROJECT_NAME }}&image=ghcr.io/${{ env.IMAGE }}:latest"
