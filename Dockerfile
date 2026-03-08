@@ -9,12 +9,18 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /carter-webhook .
 
 # ── Stage 2: runtime ───────────────────────────────────────────────────────────
-# distroless = no shell, no package manager, minimal attack surface
-FROM gcr.io/distroless/static:nonroot
-COPY --from=build /carter-webhook /carter-webhook
+FROM alpine:3.19
+RUN apk add --no-cache bash curl
+
+# Non-root user
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+WORKDIR /app
+COPY --from=build /carter-webhook .
+
+USER appuser
 
 ENV PORT=8080
-
 EXPOSE 8080
 
-ENTRYPOINT ["/carter-webhook"]
+ENTRYPOINT ["/app/carter-webhook"]
